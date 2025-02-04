@@ -87,3 +87,7 @@ INTERSECTION
 ### Known bugs
 
 - Intersections are drawn with deviations (turf.js)
+
+### Video
+
+https://github.com/user-attachments/assets/3b63432b-c88c-48ea-b662-32d1e1b42686
