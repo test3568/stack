@@ -83,3 +83,7 @@ INTERSECTION
 [57.5158229, -172.6171875]
 [66.6877839, -180.3515625]
 ```
+
+### Known bugs
+
+- Intersections are drawn with deviations (turf.js)
