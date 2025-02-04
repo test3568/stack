@@ -1,0 +1,12 @@
+[submodule "backend2"]
+	path = backend2
+	url = https://github.com/test3568/backend2.git
+[submodule "backend1"]
+	path = backend1
+	url = https://github.com/test3568/backend1.git
+[submodule "frontend"]
+	path = frontend
+	url = https://github.com/test3568/frontend.git
+[submodule "ws-docs"]
+	path = ws-docs
+	url = https://github.com/test3568/ws-docs.git

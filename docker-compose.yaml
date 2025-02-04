@@ -1,0 +1,280 @@
+x-backends-common-env: &backends-common
+  POSTGIS_HOST: postgis
+  POSTGIS_PORT: 5432
+  POSTGIS_USER: postgres
+  POSTGIS_PASSWORD: pass
+  KAFKA_HOST: kafka
+  KAFKA_PORT: 9092
+  GDAL_LIBRARY_PATH: ''
+  GEOS_LIBRARY_PATH: ''
+  DJANGO_LOG_LEVEL: INFO
+  APP_LOG_LEVEL: DEBUG
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+
+x-backend-env: &backend-env
+  <<: *backends-common
+  DJANGO_SECRET_KEY: secret666
+  DJANGO_DEBUG: true
+  AMQP_HOST: rabbitmq
+  AMQP_PORT: 5672
+  AMQP_USER: user
+  AMQP_PASSWORD: pass
+  KAFKA_CONSUMER_TOPIC: polygons_back
+  KAFKA_PRODUCER_TOPIC: polygons
+  CORS_ORIGIN_WHITELIST: '["http://localhost:6661", "http://127.0.0.1:6661"]'
+  CSRF_TRUSTED_ORIGINS: '["http://localhost:6661", "http://127.0.0.1:6661"]'
+
+x-backend2-env: &backend2-env
+  <<: *backends-common
+  DJANGO_SECRET_KEY: secret666_2
+  DJANGO_DEBUG: false
+  KAFKA_CONSUMER_TOPIC: polygons
+  KAFKA_PRODUCER_TOPIC: polygons_back
+
+x-logging: &logging
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "50m"
+
+x-restart-always: &restart-always
+  restart: always
+
+services:
+  postgis:
+    <<: [*logging, *restart-always]
+    image: postgis/postgis:17-3.5
+    container_name: postgis
+    volumes:
+      - postgis_volume:/var/lib/postgresql
+    environment:
+      - POSTGRES_PASSWORD=pass
+    deploy:
+      endpoint_mode: dnsrr
+    ports:
+      - "9990:5432"
+    healthcheck:
+      test: pg_isready
+      interval: 1s
+      timeout: 10s
+      retries: 60
+      start_period: 1s
+
+  redis:
+    <<: [*logging, *restart-always]
+    image: redis:7.4.2
+    container_name: redis
+    volumes:
+      - redis_volume:/data
+    ports:
+      - "9991:6379"
+    healthcheck:
+      test: redis-cli ping
+      interval: 1s
+      timeout: 10s
+      retries: 60
+      start_period: 1s
+    deploy:
+      endpoint_mode: dnsrr
+
+  rabbitmq:
+    <<: [*logging, *restart-always]
+    image: rabbitmq:4.0.5-management
+    container_name: rabbitmq
+    environment:
+      - RABBITMQ_DEFAULT_USER=user
+      - RABBITMQ_DEFAULT_PASS=pass
+    volumes:
+      - rabbitmq_volume:/var/lib/rabbitmq
+    ports:
+      - "6669:8080"
+      - "9992:5672"
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 1s
+      timeout: 10s
+      retries: 60
+      start_period: 1s
+    deploy:
+      endpoint_mode: dnsrr
+
+  kafka:
+    <<: [*logging, *restart-always]
+    image: apache/kafka:3.9.0
+    container_name: kafka
+    ports:
+      - "9993:9993"
+    volumes:
+      - kafka_volume:/var/lib/kafka/data
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_EXT://:9993
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_EXT://localhost:9993
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_EXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: 1
+    healthcheck:
+      test: nc -z kafka 9092 || exit -1
+      interval: 1s
+      timeout: 10s
+      retries: 60
+      start_period: 1s
+    deploy:
+      endpoint_mode: dnsrr
+
+  pgadmin:
+    <<: [*logging, *restart-always]
+    image: dpage/pgadmin4:8.14.0
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: local@email.in
+      PGADMIN_DEFAULT_PASSWORD: pass
+    volumes:
+      - pgadmin_volume:/var/lib/pgadmin
+    ports:
+      - "6670:80"
+    healthcheck:
+      test: wget -O - http://localhost:80/misc/ping
+      interval: 1s
+      timeout: 10s
+      retries: 60
+      start_period: 1s
+    deploy:
+      endpoint_mode: dnsrr
+
+  db-makemigrations:
+    <<: *logging
+    container_name: db-makemigrations
+    depends_on:
+      postgis:
+        condition: service_healthy
+    build: backend1/
+    image: stack-backend
+    environment:
+      <<: *backend-env
+    command: ["python", "manage.py", "makemigrations"]
+    restart: on-failure
+    volumes:
+      - migrations:/usr/app/src/polygons/migrations
+
+  db-migration:
+    <<: *logging
+    container_name: db-migration
+    depends_on:
+      db-makemigrations:
+        condition: service_completed_successfully
+    image: stack-backend
+    environment:
+      <<: *backend-env
+    command: [ "python", "manage.py", "migrate" ]
+    restart: on-failure
+    volumes:
+      - migrations:/usr/app/src/polygons/migrations
+
+  backend-api:
+    <<: [*logging, *restart-always]
+    container_name: backend-api
+    depends_on:
+      postgis:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      db-migration:
+        condition: service_completed_successfully
+    image: stack-backend
+    environment:
+      <<: *backend-env
+    command: ["sh", "-c", "python manage.py collectstatic --noinput && daphne --root-path=/app -b backend-api -p 8000 backend.asgi:application"]
+    ports:
+      - "6660:8000"
+    volumes:
+      - migrations:/usr/app/src/polygons/migrations
+      - static-files:/usr/app/static
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://backend-api:8000/healthcheck || exit 1
+      interval: 1s
+      timeout: 10s
+      retries: 60
+      start_period: 1s
+    deploy:
+      endpoint_mode: dnsrr
+
+  backend-kafka:
+    <<: [*logging, *restart-always]
+    container_name: backend-kafka
+    depends_on:
+      backend-api:
+        condition: service_healthy
+    image: stack-backend
+    environment:
+      <<: *backend-env
+    command: ["python", "manage.py", "run_kafka_consumer"]
+    deploy:
+      endpoint_mode: dnsrr
+
+  backend-celery:
+    <<: [*logging, *restart-always]
+    container_name: backend-celery
+    depends_on:
+      backend-api:
+        condition: service_healthy
+    image: stack-backend
+    environment:
+      <<: *backend-env
+    command: ["celery", "-A", "backend", "worker", "-l", "INFO"]
+    deploy:
+      endpoint_mode: dnsrr
+
+  backend2-kafka:
+    <<: [*logging, *restart-always]
+    container_name: backend2-kafka
+    depends_on:
+      backend-api:
+        condition: service_healthy
+    build: backend2/
+    image: stack-backend2
+    environment:
+      <<: *backend2-env
+    command: ["python", "manage.py", "run_kafka_consumer"]
+    deploy:
+      endpoint_mode: dnsrr
+
+  frontend:
+    <<: [*logging, *restart-always]
+    container_name: frontend
+    depends_on:
+      backend-api:
+        condition: service_healthy
+    build: frontend/
+    ports:
+      - "6661:8080"
+    volumes:
+      - static-files:/home/app/staticfiles
+    deploy:
+      endpoint_mode: dnsrr
+
+  ws-docs:
+    <<: [*logging, *restart-always]
+    container_name: ws-docs
+    build: ws-docs/
+    ports:
+      - "6662:8080"
+    deploy:
+      endpoint_mode: dnsrr
+
+volumes:
+  postgis_volume:
+  redis_volume:
+  rabbitmq_volume:
+  kafka_volume:
+  pgadmin_volume:
+  migrations:
+  static-files:
